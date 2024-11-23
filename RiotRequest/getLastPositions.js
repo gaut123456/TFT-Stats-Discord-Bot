@@ -1,6 +1,5 @@
 require('dotenv').config({ path: '../.env' });
 
-console.log(process.env.RIOT_API_KEY);
 
 
 const REGIONAL_ENDPOINTS = {

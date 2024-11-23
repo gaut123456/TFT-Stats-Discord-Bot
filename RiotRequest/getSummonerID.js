@@ -24,7 +24,6 @@ const getSummonerID = async (server, puuid) => {
             }
         }
 
-        console.log(data);
         return data;
     } catch (error) {
         console.error('Error fetching account:', error.message);

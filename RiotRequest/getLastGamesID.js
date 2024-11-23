@@ -19,7 +19,6 @@ const REGIONAL_ENDPOINTS = {
 const getLastGamesID = async (server, puuid) => {
 
     const region = REGIONAL_ENDPOINTS[server];
-    console.log(region);
     try {
 
 
