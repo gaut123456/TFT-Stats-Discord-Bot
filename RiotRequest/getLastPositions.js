@@ -1,5 +1,8 @@
 require('dotenv').config({ path: '../.env' });
 
+console.log(process.env.RIOT_API_KEY);
+
+
 const REGIONAL_ENDPOINTS = {
     'na1': 'americas',
     'br1': 'americas',
@@ -13,15 +16,14 @@ const REGIONAL_ENDPOINTS = {
     'ru': 'europe'
 };
 
-const getSummonerPuuid = async (server, riotId) => {
-    try {
-        const [gameName, tagLine] = riotId.split('#');
+const getLastPositions = async (server, matchId) => {
 
-        const region = REGIONAL_ENDPOINTS[server] || 'europe';
+    const region = REGIONAL_ENDPOINTS[server];
+    try {
 
 
         const response = await fetch(
-            `https://${region}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`,
+            `https://${region}.api.riotgames.com/tft/match/v1/matches/${matchId}`,
             {
                 method: 'GET',
                 headers: {
@@ -30,7 +32,9 @@ const getSummonerPuuid = async (server, riotId) => {
             }
         );
 
+
         const data = await response.json();
+
 
         if (data.status) {
             console.log('API Response:', data);
@@ -44,6 +48,8 @@ const getSummonerPuuid = async (server, riotId) => {
         console.error('Error fetching account:', error.message);
         return null;
     }
+
+
 };
 
-module.exports = { getSummonerPuuid };
+module.exports = { getLastPositions };
