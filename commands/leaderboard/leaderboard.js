@@ -24,6 +24,50 @@ const divisionOrder = {
     'I': 1
 };
 
+async function getCachedSummonerData(username, region) {
+    const db = clientDB.db();
+    const collection = db.collection('summoner_cache');
+    
+    const cachedData = await collection.findOne({ 
+        username: username.toLowerCase(), 
+        region: region 
+    });
+
+    if (cachedData && cachedData.lastUpdated > Date.now() - (24 * 60 * 60 * 1000)) {
+        return cachedData;
+    }
+    
+    // If cache miss or expired, fetch new data
+    const summonerPuuid = await getSummonerPuuid.getSummonerPuuid(region, username);
+    const summonerID = await getSummonerID.getSummonerID(region, summonerPuuid.puuid);
+    
+    // Update cache
+    const newData = {
+        puuid: summonerPuuid.puuid,
+        id: summonerID.id,
+        lastUpdated: Date.now()
+    };
+
+    await collection.updateOne(
+        { username: username.toLowerCase(), region: region },
+        { $set: newData },
+        { upsert: true }
+    );
+
+    return newData;
+}
+
+async function getRankWithRetry(region, summonerId, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await getSummonerRank.getSummonerRank(region, summonerId);
+        } catch (error) {
+            if (i === retries - 1) throw error;
+            await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+        }
+    }
+}
+
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('leaderboard')
@@ -32,78 +76,101 @@ module.exports = {
     async execute(interaction) {
         await interaction.deferReply();
         await connect();
-        const db = clientDB.db();
-        const collection = db.collection('tft_profiles');
-        const users = await collection.find().toArray();
+        
+        try {
+            const db = clientDB.db();
+            const collection = db.collection('tft_profiles');
+            const users = await collection.find().toArray();
 
-        if (!users.length) {
-            await interaction.editReply('No profiles linked yet. Be the first to join!');
-            return;
-        }
+            if (!users.length) {
+                await interaction.editReply('No profiles linked yet. Be the first to join!');
+                return;
+            }
 
-        const leaderboard = [];
-        for (const user of users) {
-            const { region, username } = user;
-            const cleanUsername = username.split('#')[0];
-            
-            const summonerPuuid = await getSummonerPuuid.getSummonerPuuid(region, username);
-            const summonerID = await getSummonerID.getSummonerID(region, summonerPuuid.puuid);
-            const summonerRank = await getSummonerRank.getSummonerRank(region, summonerID.id);
-            
-            const rankInfo = summonerRank[0] || { tier: 'UNRANKED', rank: '', leaguePoints: 0 };
-            leaderboard.push({
-                username: cleanUsername,
-                region,
-                rank: rankInfo.tier,
-                division: rankInfo.rank,
-                rankOrder: rankData[rankInfo.tier]?.order || 0,
-                divisionOrder: divisionOrder[rankInfo.rank] || 0,
-                lp: rankInfo.leaguePoints,
-            });
-        }
+            const leaderboard = [];
+            // Process users in parallel with a concurrency limit
+            const chunkSize = 5; // Process 5 users at a time to avoid rate limits
+            for (let i = 0; i < users.length; i += chunkSize) {
+                const chunk = users.slice(i, i + chunkSize);
+                const promises = chunk.map(async user => {
+                    try {
+                        const { region, username } = user;
+                        const cleanUsername = username.split('#')[0];
+                        
+                        // Get cached summoner data
+                        const summonerData = await getCachedSummonerData(username, region);
+                        
+                        // Get rank info with retry mechanism
+                        const summonerRank = await getRankWithRetry(region, summonerData.id);
+                        const rankInfo = summonerRank[0] || { tier: 'UNRANKED', rank: '', leaguePoints: 0 };
 
-        leaderboard.sort((a, b) => {
-            if (a.rankOrder === b.rankOrder) {
-                if (a.divisionOrder === b.divisionOrder) {
-                    return b.lp - a.lp;
+                        return {
+                            username: cleanUsername,
+                            region,
+                            rank: rankInfo.tier,
+                            division: rankInfo.rank,
+                            rankOrder: rankData[rankInfo.tier]?.order || 0,
+                            divisionOrder: divisionOrder[rankInfo.rank] || 0,
+                            lp: rankInfo.leaguePoints,
+                        };
+                    } catch (error) {
+                        console.error(`Error processing user ${user.username}:`, error);
+                        return null;
+                    }
+                });
+
+                const results = await Promise.all(promises);
+                leaderboard.push(...results.filter(result => result !== null));
+                
+                // Add a small delay between chunks to avoid rate limits
+                if (i + chunkSize < users.length) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
                 }
-                return a.divisionOrder - b.divisionOrder;
             }
-            return b.rankOrder - a.rankOrder;
-        });
 
-        const embed = new EmbedBuilder()
-            .setColor(0x2E6BE6)
-            .setTitle('TFT Ranked Leaderboard - Top 10')
-        // Create medal emojis for top 3
-        const medals = ['🥇', '🥈', '🥉'];
+            leaderboard.sort((a, b) => {
+                if (a.rankOrder === b.rankOrder) {
+                    if (a.divisionOrder === b.divisionOrder) {
+                        return b.lp - a.lp;
+                    }
+                    return a.divisionOrder - b.divisionOrder;
+                }
+                return b.rankOrder - a.rankOrder;
+            });
 
-        // Create two columns
-        let playersColumn = '';
-        let ranksColumn = '';
+            const embed = new EmbedBuilder()
+                .setColor(0x2E6BE6)
+                .setTitle('TFT Ranked Leaderboard - Top 10');
 
-        leaderboard.slice(0, 10).forEach((profile, index) => {
-            let position;
-            if (index < 3) {
-                position = medals[index];
-            } else {
-                // Add extra spaces after numbers for alignment with medals
-                position = `${index + 1}.  `;
-            }
-            
-            const rankDisplay = profile.division ? 
-                `${profile.rank} ${profile.division} ${profile.lp} LP` : 
-                `${profile.rank} ${profile.lp} LP`;
+            const medals = ['🥇', '🥈', '🥉'];
+            let playersColumn = '';
+            let ranksColumn = '';
 
-            playersColumn += `${position} ${profile.username}\n`;
-            ranksColumn += `${rankDisplay}\n`;
-        });
+            leaderboard.slice(0, 10).forEach((profile, index) => {
+                let position;
+                if (index < 3) {
+                    position = medals[index];
+                } else {
+                    position = `${index + 1}. `;
+                }
+                
+                const rankDisplay = profile.division ?
+                    `${profile.rank} ${profile.division} ${profile.lp} LP` :
+                    `${profile.rank} ${profile.lp} LP`;
 
-        embed.addFields(
-            { name: 'Players', value: playersColumn, inline: true },
-            { name: 'Rank', value: ranksColumn, inline: true }
-        );
+                playersColumn += `${position} ${profile.username}\n`;
+                ranksColumn += `${rankDisplay}\n`;
+            });
 
-        await interaction.editReply({ embeds: [embed] });
+            embed.addFields(
+                { name: 'Players', value: playersColumn || 'No players found', inline: true },
+                { name: 'Rank', value: ranksColumn || 'No ranks found', inline: true }
+            );
+
+            await interaction.editReply({ embeds: [embed] });
+        } catch (error) {
+            console.error('Error in leaderboard command:', error);
+            await interaction.editReply('An error occurred while fetching the leaderboard. Please try again later.');
+        }
     },
 };

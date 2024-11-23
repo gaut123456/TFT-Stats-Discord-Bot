@@ -22,7 +22,6 @@ const regions = [
 
 const positionEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣'];
 
-
 function getRankColor(tier) {
     const rankColors = {
         'IRON': '#452700',
@@ -68,6 +67,44 @@ function calculateStats(positions) {
     };
 }
 
+async function getCachedSummonerData(username, region) {
+    const db = clientDB.db();
+    const collection = db.collection('summoner_cache');
+    
+    const cachedData = await collection.findOne({ 
+        username: username.toLowerCase(), 
+        region: region 
+    });
+
+    if (cachedData && cachedData.lastUpdated > Date.now() - (24 * 60 * 60 * 1000)) {
+        return cachedData;
+    }
+    
+    // If cache miss or expired, fetch new data
+    const summonerPuuid = await getSummonerPuuid.getSummonerPuuid(region, username);
+    const summonerID = await getSummonerID.getSummonerID(region, summonerPuuid.puuid);
+    
+    // Update cache
+    await collection.updateOne(
+        { username: username.toLowerCase(), region: region },
+        {
+            $set: {
+                puuid: summonerPuuid.puuid,
+                id: summonerID.id,
+                profileIconId: summonerID.profileIconId,
+                lastUpdated: Date.now()
+            }
+        },
+        { upsert: true }
+    );
+
+    return {
+        puuid: summonerPuuid.puuid,
+        id: summonerID.id,
+        profileIconId: summonerID.profileIconId
+    };
+}
+
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('rank')
@@ -107,10 +144,10 @@ module.exports = {
             }
 
             try {
-                const summonerPuuid = await getSummonerPuuid.getSummonerPuuid(region, username);
-                const summonerID = await getSummonerID.getSummonerID(region, summonerPuuid.puuid);
-                const summonerRank = await getSummonerRank.getSummonerRank(region, summonerID.id);
-                const lastGamesID = await getLastGamesID.getLastGamesID(region, summonerPuuid.puuid);
+                // Get cached or fresh summoner data
+                const summonerData = await getCachedSummonerData(username, region);
+                const summonerRank = await getSummonerRank.getSummonerRank(region, summonerData.id);
+                const lastGamesID = await getLastGamesID.getLastGamesID(region, summonerData.puuid);
 
                 const lastGamePositionsPromises = lastGamesID.map(gameID => 
                     getLastGamesPositions.getLastPositions(region, gameID)
@@ -125,7 +162,7 @@ module.exports = {
                 const lastGamePositionsArray = lastGamePositions
                     .filter(position => position !== null)
                     .map(position => position?.info?.participants
-                        ?.filter(participant => participant?.puuid === summonerPuuid.puuid)
+                        ?.filter(participant => participant?.puuid === summonerData.puuid)
                         ?.map(participant => participant.placement))
                     .flat()
                     .filter(Boolean);
@@ -133,11 +170,11 @@ module.exports = {
                 const stats = calculateStats(lastGamePositionsArray);
                 const rankTier = summonerRank[0]?.tier || 'UNRANKED';
                 const positionsAsEmojis = lastGamePositionsArray
-                    .slice(0, 10) 
+                    .slice(0, 10)
                     .map(placement => positionEmojis[placement - 1])
                     .join(' ') || 'No recent games';
 
-                const profileIconUrl = `http://ddragon.leagueoflegends.com/cdn/${ddragon_version}/img/profileicon/${summonerID.profileIconId}.png`;
+                const profileIconUrl = `http://ddragon.leagueoflegends.com/cdn/${ddragon_version}/img/profileicon/${summonerData.profileIconId}.png`;
 
                 const embed = new EmbedBuilder()
                     .setColor(getRankColor(rankTier))
